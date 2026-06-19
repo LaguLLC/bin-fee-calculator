@@ -78,14 +78,7 @@ def is_valid_assignment(events, assignment, delivery_dates):
 
 
 def deduplicate_scenarios(results):
-    """
-    Collapse only TRULY identical scenarios — same canonical bin assignment
-    AND same total fee AND same per-bin fee distribution.
-    Correctly handles:
-    - Identical duplicate events -> deduped
-    - Staggered delivery where bin swap produces different totals -> NOT deduped
-    - Same-day delivery where bin swap is truly symmetric -> deduped
-    """
+    """Collapse only TRULY identical scenarios."""
     seen = {}
     for r in results:
         bin_sets = []
@@ -134,8 +127,7 @@ def calculate_allocations(delivery_dates, free_days, rate_per_day, events,
 
         total_ext_days = 0
         for b in breakdowns:
-            for c in breakdowns[b]:
-                total_ext_days += c["ext_days"]
+            for c in breakdownstotal_ext_days += c["ext_days"]
 
         results.append({
             "combo": combo,
@@ -151,7 +143,7 @@ def calculate_allocations(delivery_dates, free_days, rate_per_day, events,
 
 
 # ──────────────────────────────────────────────
-# Decision tree (Graphviz DOT) — days only, no dollars
+# Decision tree (days-only)
 # ──────────────────────────────────────────────
 def compute_edge_ext_days(events, partial_assignment, target_idx, bin_num,
                           delivery_dates, free_days):
@@ -182,11 +174,6 @@ def compute_edge_ext_days(events, partial_assignment, target_idx, bin_num,
 
 def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
                             free_days, rate_per_day, highlight_combo=None):
-    """
-    Tree shows DAYS ONLY (no dollar amounts) to reduce visual clutter.
-    Per-bin breakdown shown inside leaf nodes.
-    Highlighted path uses bright green styling.
-    """
     free_indices = [i for i in range(len(events)) if i not in fixed_assignments]
 
     if not free_indices:
@@ -198,7 +185,6 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
     lines.append('  node [shape=box, style="rounded,filled", fillcolor=white, fontname="Arial"];')
     lines.append('  edge [fontname="Arial", fontsize=10];')
 
-    # Build Start node with delivery dates and fixed events
     start_parts = []
     for b in sorted(delivery_dates.keys()):
         d = delivery_dates[b]
@@ -270,7 +256,6 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
                             per_bin_ext[b] = ext_sum
                             total_ext += ext_sum
 
-                        # Days-only leaf label
                         leaf_lines = [f"Total: {total_ext}d"]
                         for b in sorted(bins_map.keys()):
                             leaf_lines.append(f"B{b}: {per_bin_ext[b]}d")
@@ -313,7 +298,6 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
 
 
 def build_timeline_view(scenario, num_bins, delivery_dates, free_days):
-    """Per-bin timeline as a Graphviz DOT diagram with horizontal swim lanes."""
     lines = []
     lines.append("digraph Timeline {")
     lines.append("  rankdir=LR;")
@@ -492,8 +476,8 @@ def render_results(results, events, num_bins, customer, delivery_dates,
 - 🟢 **Light green boxes** = valid leaf (total + per-bin extension days)
 - 🔴 **Pink boxes** = invalid (event predates bin's delivery, or duplicate repo)
 - 🟩 **Bright green path** = the scenario currently selected above (pick a different scenario to re-highlight)
-- **Arrow labels:** "Service date → Bin N" with **+Nd** showing extension days added by that routing
-- **Tree shows days only** (dollar amounts in scenario table + per-bin breakdown below)
+- **Arrow labels:** "Service date → Bin N" with **+Nd** showing extension days added
+- **Tree shows days only** (dollar amounts are in the scenario table + breakdown below)
 - Both bins appear in one tree because every decision affects both
                     """
                 )
@@ -589,17 +573,17 @@ with st.sidebar:
     show_timeline = st.checkbox(
         "📅 Show per-bin timeline",
         value=False,
-        help="Alternative view: each bin as its own horizontal swim lane (Delivery → Service → Service).",
+        help="Alternative view: each bin as its own horizontal swim lane.",
     )
     show_days = st.checkbox(
         "📊 Show days alongside dollars",
         value=True,
-        help="Adds extension day counts next to dollar amounts in tables/metrics (e.g., $600 (12d)).",
+        help="Adds extension day counts next to dollar amounts in tables/metrics.",
     )
     interchangeable = st.checkbox(
         "🔁 Hide duplicate scenarios",
         value=True,
-        help="Collapse scenarios with identical totals and bin-fee distributions. Safe to leave ON — won't merge scenarios with truly different outcomes (e.g., staggered delivery).",
+        help="Collapse scenarios with identical totals and bin-fee distributions.",
     )
 
 
@@ -657,7 +641,8 @@ with tab1:
     if input_mode == "📋 Table (paste from Excel)":
         st.caption(
             "🔄 **Auto-sync rules:** Return date clears when Type = S/Repo. "
-            "For S/Rtn, return date follows haul date until manually overridden."
+            "For S/Rtn, return date follows haul date until manually overridden. "
+            "Sync takes effect on your next interaction (click another cell, etc.)."
         )
 
         earliest_delivery = min(delivery_dates.values())
@@ -691,6 +676,7 @@ with tab1:
                     help="S/Rtn = bin returns; S/Repo = rental ends",
                     options=type_options,
                     required=True,
+                    default="S/Rtn",
                 ),
                 "Return date": st.column_config.DateColumn(
                     "Return date",
@@ -702,20 +688,35 @@ with tab1:
                     help="Lock event to a specific bin, or leave Unknown",
                     options=bin_options,
                     required=True,
+                    default="Unknown",
                 ),
             },
             key="events_table",
         )
 
+        # Apply auto-sync rules WITHOUT forced rerun (lets typing land naturally)
         sync_state = st.session_state["row_sync_state"]
         previous_df = st.session_state["events_table_df"]
-        changed = False
         synced_df = edited_df.copy()
 
         for idx in synced_df.index:
             row_type = synced_df.at[idx, "Type"]
             row_haul = synced_df.at[idx, "Haul date"]
             row_return = synced_df.at[idx, "Return date"]
+            row_bin = synced_df.at[idx, "Bin (if known)"]
+
+            # Default new rows' Bin to "Unknown" if it ended up empty/None
+            if pd.isna(row_bin) or row_bin is None or row_bin == "":
+                synced_df.at[idx, "Bin (if known)"] = "Unknown"
+
+            # Default new rows' Type to "S/Rtn" if missing
+            if pd.isna(row_type) or row_type is None or row_type == "":
+                synced_df.at[idx, "Type"] = "S/Rtn"
+                row_type = "S/Rtn"
+
+            # Skip sync for incomplete rows so the user can finish typing
+            if pd.isna(row_haul):
+                continue
 
             prev_haul = None
             prev_return = None
@@ -730,16 +731,12 @@ with tab1:
             if row_type == "S/Repo":
                 if not pd.isna(row_return):
                     synced_df.at[idx, "Return date"] = pd.NaT
-                    changed = True
                 sync_state[idx] = True
 
             elif row_type == "S/Rtn":
-                if pd.isna(row_haul):
-                    pass
-                elif pd.isna(row_return):
+                if pd.isna(row_return):
                     synced_df.at[idx, "Return date"] = row_haul
                     sync_state[idx] = True
-                    changed = True
                 else:
                     user_changed_return = (prev_return != row_return) and not (
                         pd.isna(prev_return) and pd.isna(row_return)
@@ -752,7 +749,6 @@ with tab1:
                     if type_changed_to_rtn:
                         synced_df.at[idx, "Return date"] = row_haul
                         sync_state[idx] = True
-                        changed = True
                     elif user_changed_return:
                         if row_return == row_haul:
                             sync_state[idx] = True
@@ -761,7 +757,6 @@ with tab1:
                     elif user_changed_haul and was_synced:
                         synced_df.at[idx, "Return date"] = row_haul
                         sync_state[idx] = True
-                        changed = True
 
         synced_df["⚠️"] = ""
         for idx in synced_df.index:
@@ -781,9 +776,6 @@ with tab1:
             df_to_save = df_to_save.drop(columns=["⚠️"])
         st.session_state["events_table_df"] = df_to_save
         st.session_state["row_sync_state"] = sync_state
-
-        if changed:
-            st.rerun()
 
         edited_df = synced_df
 
@@ -805,6 +797,12 @@ with tab1:
                     continue
                 if hasattr(haul, "date"):
                     haul = haul.date()
+
+                # Default fallbacks
+                if pd.isna(ev_type) or ev_type is None or ev_type == "":
+                    ev_type = "S/Rtn"
+                if pd.isna(bin_choice) or bin_choice is None or bin_choice == "":
+                    bin_choice = "Unknown"
 
                 if ev_type == "S/Repo":
                     return_date = haul
