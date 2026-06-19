@@ -404,19 +404,38 @@ with tab1:
             "click the first cell below, and press **Ctrl+V**. "
             "Add rows with **➕** below the table, or delete with the trash icon."
         )
-        st.caption(
-            "Excel column format — Haul date: `YYYY-MM-DD` | Type: `S/Rtn` or `S/Repo` | "
-            "Return date: blank for S/Repo; defaults to haul date for S/Rtn (override for off-site gaps) "
-            "| Bin: `Unknown` or `Bin 1`, `Bin 2`, etc."
+st.caption(
+            "🔄 **Auto-sync rules:** Return date clears automatically when Type = S/Repo. "
+            "For S/Rtn, blank return date auto-fills with haul date (override for off-site gaps). "
+            "Click **🧮 Calculate** to apply the rules after editing."
         )
 
-        earliest_delivery = min(delivery_dates.values())
-        default_df = pd.DataFrame({
-            "Haul date": [earliest_delivery + timedelta(days=10 * (i + 1)) for i in range(3)],
-            "Type": ["S/Rtn"] * 3,
-            "Return date": [earliest_delivery + timedelta(days=10 * (i + 1)) for i in range(3)],
-            "Bin (if known)": ["Unknown"] * 3,
-        })
+earliest_delivery = min(delivery_dates.values())
+        # Initialize table state once per session so edits persist between reruns
+        if "events_table_df" not in st.session_state:
+            st.session_state["events_table_df"] = pd.DataFrame({
+                "Haul date": [earliest_delivery + timedelta(days=10 * (i + 1)) for i in range(3)],
+                "Type": ["S/Rtn"] * 3,
+                "Return date": [earliest_delivery + timedelta(days=10 * (i + 1)) for i in range(3)],
+                "Bin (if known)": ["Unknown"] * 3,
+            })
+
+        # Apply auto-sync rules before rendering:
+        # - S/Rtn with blank return date -> fill with haul date
+        # - S/Repo -> clear return date (blank)
+        df_to_show = st.session_state["events_table_df"].copy()
+        for idx in df_to_show.index:
+            row_type = df_to_show.at[idx, "Type"]
+            row_haul = df_to_show.at[idx, "Haul date"]
+            row_return = df_to_show.at[idx, "Return date"]
+
+            if row_type == "S/Repo":
+                df_to_show.at[idx, "Return date"] = pd.NaT
+            elif row_type == "S/Rtn":
+                if pd.isna(row_return) and not pd.isna(row_haul):
+                    df_to_show.at[idx, "Return date"] = row_haul
+
+        default_df = df_to_show
 
         edited_df = st.data_editor(
             default_df,
@@ -449,6 +468,15 @@ with tab1:
             },
             key="events_table",
         )
+
+        # Persist edits and re-apply S/Repo blanking on next rerun
+        st.session_state["events_table_df"] = edited_df.copy()
+
+    # Allow users to re-apply auto-sync rules without calculating
+            col_refresh, _ = st.columns([1, 3])
+            with col_refresh:
+                if st.button("🔄 Apply auto-sync rules", help="Clears S/Repo return dates and auto-fills S/Rtn return dates"):
+                    st.rerun()
 
         if st.button("🧮 Calculate all scenarios", type="primary", key="calc_table"):
             for i, row in edited_df.iterrows():
