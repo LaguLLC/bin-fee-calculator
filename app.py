@@ -83,28 +83,19 @@ def deduplicate_scenarios(results):
 
     A "duplicate" means two scenarios that:
     1. Have the SAME canonical event grouping (same set of events per bin,
-       just possibly with bin labels swapped — i.e., mirror permutations), AND
+       just possibly with bin labels swapped), AND
     2. Produce the SAME per-bin fee distribution (so the math truly matches —
        this prevents wrongly merging staggered-delivery cases where swapping
        which bin handles which events DOES change the totals).
-
-    Two scenarios with the same dollar total but different event groupings
-    are NOT considered duplicates (they're genuinely different assignments).
     """
     seen = {}
     for r in results:
-        # Build canonical event grouping (bin labels neutralized)
         bin_sets = []
         for b in sorted(r["assignment"].keys()):
             event_tuple = tuple(sorted(r["assignment"][b]))
             bin_sets.append(event_tuple)
         canonical_events = tuple(sorted(bin_sets))
-
-        # Per-bin fee tuple (also sorted to neutralize bin labels) — guards
-        # against staggered-delivery cases where mirror permutations would
-        # otherwise be deduped but produce different actual math.
         fee_tuple = tuple(sorted(r["fees"].values()))
-
         canonical = (canonical_events, fee_tuple)
         if canonical not in seen:
             seen[canonical] = r
@@ -194,7 +185,8 @@ def compute_edge_ext_days(events, partial_assignment, target_idx, bin_num,
 
 
 def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
-                            free_days, rate_per_day, highlight_combo=None):
+                            free_days, rate_per_day, highlight_combo=None,
+                            hide_invalid=False):
     free_indices = [i for i in range(len(events)) if i not in fixed_assignments]
 
     if not free_indices:
@@ -238,7 +230,6 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
         for partial, parent_id in frontier.items():
             for bin_num in range(1, num_bins + 1):
                 new_partial = partial + (bin_num,)
-                nid = new_id()
 
                 edge_assignment = dict(fixed_assignments)
                 for fi, bn in zip(free_indices[:depth + 1], new_partial):
@@ -255,6 +246,10 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
                         for i in range(depth + 1)
                     )
                     on_highlight_path = matches
+
+                skip_branch = False
+                node_lines = []
+                nid = None
 
                 if is_last:
                     full_assignment = dict(fixed_assignments)
@@ -288,17 +283,28 @@ def build_decision_tree_dot(events, fixed_assignments, num_bins, delivery_dates,
                         else:
                             fill = "#d1e7dd"
                             node_extras = ""
-                        lines.append(f'  {nid} [label="{leaf_label}", fillcolor="{fill}"{node_extras}];')
+                        nid = new_id()
+                        node_lines.append(f'  {nid} [label="{leaf_label}", fillcolor="{fill}"{node_extras}];')
                     else:
-                        lines.append(f'  {nid} [label="(invalid)", fillcolor="#f8d7da"];')
+                        if hide_invalid:
+                            skip_branch = True
+                        else:
+                            nid = new_id()
+                            node_lines.append(f'  {nid} [label="(invalid)", fillcolor="#f8d7da"];')
                 else:
                     next_idx = free_indices[depth + 1]
                     next_lbl = events[next_idx]["label"]
                     node_label = f"Which bin handled\\n{next_lbl}?"
+                    nid = new_id()
                     if on_highlight_path:
-                        lines.append(f'  {nid} [label="{node_label}", fillcolor="#fff3cd", penwidth=2];')
+                        node_lines.append(f'  {nid} [label="{node_label}", fillcolor="#fff3cd", penwidth=2];')
                     else:
-                        lines.append(f'  {nid} [label="{node_label}"];')
+                        node_lines.append(f'  {nid} [label="{node_label}"];')
+
+                if skip_branch:
+                    continue
+
+                lines.extend(node_lines)
 
                 if edge_ext > 0:
                     edge_label = f"{ev_label} -> Bin {bin_num}\\n+{edge_ext}d"
@@ -426,7 +432,7 @@ def add_to_history(customer, delivery_dates, events, results):
 # ──────────────────────────────────────────────
 def render_results(results, events, num_bins, customer, delivery_dates,
                    show_tree, fixed_assignments, free_days, rate_per_day,
-                   interchangeable, show_days, show_timeline):
+                   interchangeable, show_days, show_timeline, hide_invalid_leaves):
     if not results:
         st.error(
             "No valid scenarios found. Check that each bin has at most one "
@@ -435,7 +441,6 @@ def render_results(results, events, num_bins, customer, delivery_dates,
         )
         return
 
-    # Detect: dedupe is OFF AND at least one event has Unknown bin
     has_unknown_bins = len(events) > len(fixed_assignments)
     if (not interchangeable) and has_unknown_bins:
         st.warning(
@@ -497,25 +502,30 @@ def render_results(results, events, num_bins, customer, delivery_dates,
             events, fixed_assignments, num_bins, delivery_dates,
             free_days, rate_per_day,
             highlight_combo=selected_scenario.get("combo"),
+            hide_invalid=hide_invalid_leaves,
         )
         if dot is None:
             st.info("No decisions to display — all events are locked to specific bins.")
         else:
             try:
                 st.graphviz_chart(dot, use_container_width=True)
-                st.markdown(
-                    """
+
+                legend_text = """
 **🗺️ Tree legend**
 
 - 🔵 **Blue oval** = Start (shows delivery dates + locked bins)
 - ⬜ **White boxes** = "Which bin?" decision points
 - 🟢 **Light green boxes** = valid leaf (total + per-bin extension days)
-- 🔴 **Pink boxes** = invalid (event predates bin's delivery, or duplicate repo)
 - 🟩 **Bright green path** = the scenario currently selected above
 - **Arrow labels:** "Service date → Bin N" with **+Nd** showing extension days added
 - Tree shows **days only** (dollars in scenario table + breakdown below)
-                    """
-                )
+"""
+                if not hide_invalid_leaves:
+                    legend_text = legend_text.replace(
+                        "- 🟩 **Bright green path**",
+                        "- 🔴 **Pink boxes** = invalid (event predates bin's delivery, or duplicate repo)\n- 🟩 **Bright green path**",
+                    )
+                st.markdown(legend_text)
             except Exception as ex:
                 st.warning(f"Could not render decision tree: {ex}")
 
@@ -605,6 +615,16 @@ with st.sidebar:
         value=False,
         help="Tree showing all allocation possibilities (days-only labels).",
     )
+    hide_invalid_leaves = st.checkbox(
+        "🚫 Hide invalid leaves from tree",
+        value=True,
+        help=(
+            "Skip branches that lead to impossible scenarios "
+            "(e.g., an event predating its bin's delivery date). "
+            "Reduces clutter when staggered delivery rules out many permutations."
+        ),
+        disabled=not show_tree,
+    )
     show_timeline = st.checkbox(
         "📅 Show per-bin timeline",
         value=False,
@@ -620,7 +640,7 @@ with st.sidebar:
         value=True,
         help=(
             "Turn ON to collapse scenarios where the bin labels differ but "
-            "the figures per bin and the event groupings are identical.\n\n"
+            "the figures per bin and the groupings of events are identical.\n\n"
             "Turn OFF if the bins are not interchangeable (e.g., different "
             "sizes) AND you want to see all possible bin assignments."
         ),
@@ -755,7 +775,6 @@ with tab1:
             key="events_table",
         )
 
-        # ─── Live auto-sync (compares against prior USER-VISIBLE state) ──
         synced_df = edited_df.copy()
         prior_df = st.session_state["prior_user_state"]
         overrides = st.session_state["row_override"]
@@ -1059,6 +1078,7 @@ with tab1:
             interchangeable,
             show_days,
             show_timeline,
+            hide_invalid_leaves,
         )
 
 
