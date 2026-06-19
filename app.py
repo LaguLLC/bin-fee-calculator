@@ -5,6 +5,7 @@ import os
 from datetime import date, timedelta
 from itertools import product
 
+
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
@@ -399,18 +400,14 @@ with tab1:
     errors = []
 
     if input_mode == "📋 Table (paste from Excel)":
-        st.markdown(
-            "💡 **Tip:** Copy rows from Excel (Haul date | Type | Return date | Bin), "
-            "click the first cell below, and press **Ctrl+V**. "
-            "Add rows with **➕** below the table, or delete with the trash icon."
-        )
-st.caption(
+        st.caption(
             "🔄 **Auto-sync rules:** Return date clears automatically when Type = S/Repo. "
             "For S/Rtn, blank return date auto-fills with haul date (override for off-site gaps). "
-            "Click **🧮 Calculate** to apply the rules after editing."
+            "Click 🔄 Apply auto-sync rules or 🧮 Calculate to refresh."
         )
 
         earliest_delivery = min(delivery_dates.values())
+
         # Initialize table state once per session so edits persist between reruns
         if "events_table_df" not in st.session_state:
             st.session_state["events_table_df"] = pd.DataFrame({
@@ -420,9 +417,9 @@ st.caption(
                 "Bin (if known)": ["Unknown"] * 3,
             })
 
-        # Apply auto-sync rules before rendering:
-        # - S/Rtn with blank return date -> fill with haul date
+        # Apply auto-sync rules before showing:
         # - S/Repo -> clear return date (blank)
+        # - S/Rtn with blank return date -> fill with haul date
         df_to_show = st.session_state["events_table_df"].copy()
         for idx in df_to_show.index:
             row_type = df_to_show.at[idx, "Type"]
@@ -435,10 +432,8 @@ st.caption(
                 if pd.isna(row_return) and not pd.isna(row_haul):
                     df_to_show.at[idx, "Return date"] = row_haul
 
-        default_df = df_to_show
-
         edited_df = st.data_editor(
-            default_df,
+            df_to_show,
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -469,14 +464,14 @@ st.caption(
             key="events_table",
         )
 
-        # Persist edits and re-apply S/Repo blanking on next rerun
+        # Persist edits so the next rerun applies auto-sync to the new state
         st.session_state["events_table_df"] = edited_df.copy()
 
-    # Allow users to re-apply auto-sync rules without calculating
-            col_refresh, _ = st.columns([1, 3])
-            with col_refresh:
-                if st.button("🔄 Apply auto-sync rules", help="Clears S/Repo return dates and auto-fills S/Rtn return dates"):
-                    st.rerun()
+        # Manual refresh button for users who want auto-sync without calculating
+        col_refresh, _ = st.columns([1, 3])
+        with col_refresh:
+            if st.button("🔄 Apply auto-sync rules", help="Clear S/Repo return dates and fill blank S/Rtn return dates"):
+                st.rerun()
 
         if st.button("🧮 Calculate all scenarios", type="primary", key="calc_table"):
             for i, row in edited_df.iterrows():
@@ -560,12 +555,10 @@ st.caption(
                     ret_key = f"ret{i}"
                     override_key = f"ret_overridden{i}"
 
-                    # Initialize override flag once per session
                     has_override = st.session_state.get(override_key, False)
                     if override_key not in st.session_state:
                         st.session_state[override_key] = False
 
-                    # Auto-sync return date with haul date unless user overrode it
                     if not has_override:
                         st.session_state[ret_key] = haul
 
@@ -575,7 +568,6 @@ st.caption(
                         help="Auto-fills to haul date. Edit only for off-site gaps.",
                     )
 
-                    # Detect manual override
                     if return_date != haul:
                         st.session_state[override_key] = True
                     elif return_date == haul and has_override:
