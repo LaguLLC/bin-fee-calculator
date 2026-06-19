@@ -10,121 +10,13 @@ import streamlit.components.v1 as components
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-SERVICE_RETURN = "service_return"
-REPO = "repo"
-HISTORY_FILE = "history.json"
-
-TYPE_DISPLAY = {
-    "S/Rtn": SERVICE_RETURN,
-    "S/Repo": REPO,
-}
-
-
-# ──────────────────────────────────────────────
-# Formatting helpers
-# ──────────────────────────────────────────────
-def fmt_fee(amount, ext_days=None, show_days=True):
-    if show_days and ext_days is not None:
-        return f"${amount:,.0f} ({ext_days}d)"
-    return f"${amount:,.0f}"
-
-
-# ──────────────────────────────────────────────
-# Core fee calculation
-# ──────────────────────────────────────────────
-def fee_for_bin(bin_events, bin_delivery_date, free_days, rate_per_day):
-    if not bin_events:
-        return 0, []
-    fee = 0
-    breakdown = []
-    cycle_start = bin_delivery_date
-    for ev in bin_events:
-        cycle_days = (ev["haul_date"] - cycle_start).days + 1
-        ext_days = max(0, cycle_days - free_days)
-        cycle_fee = ext_days * rate_per_day
-        fee += cycle_fee
-        breakdown.append({
-            "cycle_start": cycle_start,
-            "haul_date": ev["haul_date"],
-            "cycle_days": cycle_days,
-            "ext_days": ext_days,
-            "fee": cycle_fee,
-        })
-        if ev["type"] == REPO:
-            break
-        cycle_start = ev["return_date"]
-    return fee, breakdown
-
-
-def is_valid_assignment(events, assignment, delivery_dates):
-    bins = {}
-    for i, ev in enumerate(events):
-        b = assignment[i]
-        bins.setdefault(b, []).append(ev)
-    for b, bin_events in bins.items():
-        bin_events.sort(key=lambda e: e["haul_date"])
-        repo_idx = [i for i, e in enumerate(bin_events) if e["type"] == REPO]
-        if len(repo_idx) > 1:
-            return False
-        if repo_idx and repo_idx[0] != len(bin_events) - 1:
-            return False
-        bin_start = delivery_dates.get(b)
-        if bin_start is None:
-            return False
-        for e in bin_events:
-            if e["haul_date"] < bin_start:
-                return False
-    return True
-
-
-def deduplicate_scenarios(results):
-    seen = {}
-    for r in results:
-        bin_sets = []
-        for b in sorted(r["assignment"].keys()):
-            event_tuple = tuple(sorted(r["assignment"][b]))
-            bin_sets.append(event_tuple)
-        canonical_events = tuple(sorted(bin_sets))
-        fee_tuple = tuple(sorted(r["fees"].values()))
-        canonical = (canonical_events, fee_tuple, r["total"])
-        if canonical not in seen:
-            seen[canonical] = r
-    deduped = sorted(seen.values(), key=lambda x: x["total"])
-    removed = len(results) - len(deduped)
-    return deduped, removed
-
-
-def calculate_allocations(delivery_dates, free_days, rate_per_day, events,
-                          fixed_assignments=None, num_bins=2):
-    fixed_assignments = fixed_assignments or {}
-    n = len(events)
-    free_indices = [i for i in range(n) if i not in fixed_assignments]
-
-    results = []
-    for combo in product(range(1, num_bins + 1), repeat=len(free_indices)):
-        assignment = dict(fixed_assignments)
-        for idx, bin_num in zip(free_indices, combo):
-            assignment[idx] = bin_num
-
-        if not is_valid_assignment(events, assignment, delivery_dates):
-            continue
-
-        bins = {b: [] for b in range(1, num_bins + 1)}
-        for i, ev in enumerate(events):
-            bins[assignment[i]].append(ev)
-        for b in bins:
-            bins[b].sort(key=lambda e: e["haul_date"])
-
-        fees = {}
-        breakdowns = {}
-        for b in bins:
+SERVICE_RETURN = "serviceins:SERVICE_RETURN = "service_return"
             bin_delivery = delivery_dates.get(b)
             fees[b], breakdowns[b] = fee_for_bin(
                 bins[b], bin_delivery, free_days, rate_per_day
             )
         total = sum(fees.values())
 
-        # Sum extension days across all bins
         total_ext_days = 0
         for b in breakdowns:
             bin_cycles = breakdowns[b]
@@ -594,7 +486,7 @@ with st.sidebar:
 **In the events table:**
 - **Arrow keys** = move between cells (most reliable)
 - **Enter** = confirm and stay
-- **Tab** = next cell (sometimes escapes table — use arrows instead)
+- **Tab** = next cell (sometimes escapes — use arrows)
 - **Esc** = exit a cell editor
 
 **Global shortcuts:**
@@ -661,8 +553,9 @@ with tab1:
             "Press **Ctrl+Enter** anytime to run Calculate."
         )
         st.caption(
-            "🔄 **Auto-sync rules:** Return date clears when Type = S/Repo. "
-            "For S/Rtn, return date follows haul date until manually overridden."
+            "🔄 **Auto-sync rules (live):** Type S/Repo → return date blanks. "
+            "Type S/Rtn (from S/Repo) → return date fills with haul date. "
+            "S/Rtn return date follows haul changes until you override it manually."
         )
 
         earliest_delivery = min(delivery_dates.values())
@@ -675,13 +568,14 @@ with tab1:
                 "Bin (if known)": ["Unknown"] * 3,
             })
 
-        if "row_sync_state" not in st.session_state:
-            st.session_state["row_sync_state"] = {}
+        if "row_override" not in st.session_state:
+            st.session_state["row_override"] = {}
 
-        df_to_show = st.session_state["events_table_df"].copy()
+        if "prior_user_state" not in st.session_state:
+            st.session_state["prior_user_state"] = st.session_state["events_table_df"].copy()
 
         edited_df = st.data_editor(
-            df_to_show,
+            st.session_state["events_table_df"],
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -700,7 +594,7 @@ with tab1:
                 ),
                 "Return date": st.column_config.DateColumn(
                     "Return date",
-                    help="Blank for S/Repo. For S/Rtn, follows haul date until manually overridden.",
+                    help="Auto-syncs with haul date for S/Rtn. Blank for S/Repo.",
                     format="YYYY-MM-DD",
                 ),
                 "Bin (if known)": st.column_config.SelectboxColumn(
@@ -714,10 +608,11 @@ with tab1:
             key="events_table",
         )
 
-        # Auto-sync rules WITHOUT forced rerun
-        sync_state = st.session_state["row_sync_state"]
-        previous_df = st.session_state["events_table_df"]
+        # ─── Live auto-sync (compares against prior USER-VISIBLE state) ──
         synced_df = edited_df.copy()
+        prior_df = st.session_state["prior_user_state"]
+        overrides = st.session_state["row_override"]
+        anything_changed = False
 
         for idx in synced_df.index:
             row_type = synced_df.at[idx, "Type"]
@@ -725,92 +620,107 @@ with tab1:
             row_return = synced_df.at[idx, "Return date"]
             row_bin = synced_df.at[idx, "Bin (if known)"]
 
-            # Default new rows
+            # Fill missing defaults for brand-new rows
             if pd.isna(row_bin) or row_bin is None or row_bin == "":
                 synced_df.at[idx, "Bin (if known)"] = "Unknown"
             if pd.isna(row_type) or row_type is None or row_type == "":
                 synced_df.at[idx, "Type"] = "S/Rtn"
                 row_type = "S/Rtn"
 
-            # Skip sync for incomplete rows so the user can finish typing
-            if pd.isna(row_haul):
+            prior_type = None
+            prior_haul = None
+            prior_return = None
+            if idx in prior_df.index:
+                prior_type = prior_df.at[idx, "Type"]
+                prior_haul = prior_df.at[idx, "Haul date"]
+                prior_return = prior_df.at[idx, "Return date"]
+
+            # Rule 1: Type changed FROM S/Repo TO S/Rtn -> fill return with haul date
+            if prior_type == "S/Repo" and row_type == "S/Rtn":
+                if not pd.isna(row_haul):
+                    synced_df.at[idx, "Return date"] = row_haul
+                    overrides[idx] = False
+                    anything_changed = True
                 continue
 
-            prev_haul = None
-            prev_return = None
-            prev_type = None
-            if idx in previous_df.index:
-                prev_haul = previous_df.at[idx, "Haul date"]
-                prev_return = previous_df.at[idx, "Return date"]
-                prev_type = previous_df.at[idx, "Type"]
-
-            was_synced = sync_state.get(idx, True)
-
+            # Rule 2: Type is S/Repo -> always blank return date
             if row_type == "S/Repo":
                 if not pd.isna(row_return):
                     synced_df.at[idx, "Return date"] = pd.NaT
-                sync_state[idx] = True
-            elif row_type == "S/Rtn":
-                if pd.isna(row_return):
-                    synced_df.at[idx, "Return date"] = row_haul
-                    sync_state[idx] = True
+                    anything_changed = True
+                overrides[idx] = False
+                continue
+
+            # Rule 3: S/Rtn with blank return -> fill with haul date
+            if row_type == "S/Rtn" and pd.isna(row_return) and not pd.isna(row_haul):
+                synced_df.at[idx, "Return date"] = row_haul
+                overrides[idx] = False
+                anything_changed = True
+                continue
+
+            # Rule 4: User manually changed return date -> mark as overridden
+            if (
+                row_type == "S/Rtn"
+                and not pd.isna(row_return)
+                and prior_return is not None
+                and not pd.isna(prior_return)
+                and row_return != prior_return
+            ):
+                if row_return == row_haul:
+                    overrides[idx] = False
                 else:
-                    user_changed_return = (prev_return != row_return) and not (
-                        pd.isna(prev_return) and pd.isna(row_return)
-                    )
-                    user_changed_haul = (prev_haul != row_haul) and not (
-                        pd.isna(prev_haul) and pd.isna(row_haul)
-                    )
-                    type_changed_to_rtn = (prev_type == "S/Repo" and row_type == "S/Rtn")
+                    overrides[idx] = True
+                continue
 
-                    if type_changed_to_rtn:
-                        synced_df.at[idx, "Return date"] = row_haul
-                        sync_state[idx] = True
-                    elif user_changed_return:
-                        if row_return == row_haul:
-                            sync_state[idx] = True
-                        else:
-                            sync_state[idx] = False
-                    elif user_changed_haul and was_synced:
-                        synced_df.at[idx, "Return date"] = row_haul
-                        sync_state[idx] = True
+            # Rule 5: Haul date changed AND row not overridden -> return follows haul
+            if (
+                row_type == "S/Rtn"
+                and not pd.isna(row_haul)
+                and prior_haul is not None
+                and not pd.isna(prior_haul)
+                and row_haul != prior_haul
+                and not overrides.get(idx, False)
+            ):
+                synced_df.at[idx, "Return date"] = row_haul
+                anything_changed = True
+                continue
 
-        synced_df["⚠️"] = ""
-        for idx in synced_df.index:
-            row_type = synced_df.at[idx, "Type"]
-            row_haul = synced_df.at[idx, "Haul date"]
-            row_return = synced_df.at[idx, "Return date"]
+        st.session_state["events_table_df"] = synced_df.copy()
+        st.session_state["prior_user_state"] = synced_df.copy()
+        st.session_state["row_override"] = overrides
+
+        if anything_changed:
+            if "events_table" in st.session_state:
+                del st.session_state["events_table"]
+            st.rerun()
+
+        edited_df = synced_df
+
+        # ─── Validation warning ─────────────────────────────────────────
+        invalid_idxs = []
+        for idx in edited_df.index:
+            row_type = edited_df.at[idx, "Type"]
+            row_haul = edited_df.at[idx, "Haul date"]
+            row_return = edited_df.at[idx, "Return date"]
             if (
                 row_type == "S/Rtn"
                 and not pd.isna(row_haul)
                 and not pd.isna(row_return)
                 and row_return < row_haul
             ):
-                synced_df.at[idx, "⚠️"] = "⚠️ Return before haul"
+                invalid_idxs.append(idx + 1)
 
-        df_to_save = synced_df.copy()
-        if "⚠️" in df_to_save.columns:
-            df_to_save = df_to_save.drop(columns=["⚠️"])
-        st.session_state["events_table_df"] = df_to_save
-        st.session_state["row_sync_state"] = sync_state
-
-        edited_df = synced_df
-
-        invalid_rows = edited_df[edited_df.get("⚠️", "") != ""]
-        if not invalid_rows.empty:
+        if invalid_idxs:
             st.error(
-                f"⚠️ {len(invalid_rows)} row(s) have return date before haul date — "
-                "fix before calculating."
+                f"⚠️ {len(invalid_idxs)} row(s) have return date before haul date — "
+                f"fix before calculating. Rows: {invalid_idxs}"
             )
 
-        # Calculate button RIGHT after the table to minimize tab confusion
-        calc_clicked = st.button(
+        if st.button(
             "🧮 Calculate all scenarios (or press Ctrl+Enter)",
             type="primary",
             key="calc_table",
-        )
-
-        if calc_clicked:
+        ):
             for i, row in edited_df.iterrows():
                 haul = row["Haul date"]
                 ev_type = row["Type"]
@@ -969,7 +879,7 @@ with tab1:
                     "saved_to_history": False,
                 }
 
-    # Ctrl+Enter shortcut: click the Calculate button via JavaScript
+    # Ctrl+Enter shortcut
     components.html(
         """
         <script>
@@ -1077,3 +987,109 @@ with tab2:
             if st.button("🗑️ Clear all history"):
                 save_history([])
                 st.success("History cleared. Refresh the page to see the empty state.")
+REPO = "repo"
+HISTORY_FILE = "history.json"
+
+TYPE_DISPLAY = {
+    "S/Rtn": SERVICE_RETURN,
+    "S/Repo": REPO,
+}
+
+
+# ──────────────────────────────────────────────
+# Formatting helpers
+# ──────────────────────────────────────────────
+def fmt_fee(amount, ext_days=None, show_days=True):
+    if show_days and ext_days is not None:
+        return f"${amount:,.0f} ({ext_days}d)"
+    return f"${amount:,.0f}"
+
+
+# ──────────────────────────────────────────────
+# Core fee calculation
+# ──────────────────────────────────────────────
+def fee_for_bin(bin_events, bin_delivery_date, free_days, rate_per_day):
+    if not bin_events:
+        return 0, []
+    fee = 0
+    breakdown = []
+    cycle_start = bin_delivery_date
+    for ev in bin_events:
+        cycle_days = (ev["haul_date"] - cycle_start).days + 1
+        ext_days = max(0, cycle_days - free_days)
+        cycle_fee = ext_days * rate_per_day
+        fee += cycle_fee
+        breakdown.append({
+            "cycle_start": cycle_start,
+            "haul_date": ev["haul_date"],
+            "cycle_days": cycle_days,
+            "ext_days": ext_days,
+            "fee": cycle_fee,
+        })
+        if ev["type"] == REPO:
+            break
+        cycle_start = ev["return_date"]
+    return fee, breakdown
+
+
+def is_valid_assignment(events, assignment, delivery_dates):
+    bins = {}
+    for i, ev in enumerate(events):
+        b = assignment[i]
+        bins.setdefault(b, []).append(ev)
+    for b, bin_events in bins.items():
+        bin_events.sort(key=lambda e: e["haul_date"])
+        repo_idx = [i for i, e in enumerate(bin_events) if e["type"] == REPO]
+        if len(repo_idx) > 1:
+            return False
+        if repo_idx and repo_idx[0] != len(bin_events) - 1:
+            return False
+        bin_start = delivery_dates.get(b)
+        if bin_start is None:
+            return False
+        for e in bin_events:
+            if e["haul_date"] < bin_start:
+                return False
+    return True
+
+
+def deduplicate_scenarios(results):
+    seen = {}
+    for r in results:
+        bin_sets = []
+        for b in sorted(r["assignment"].keys()):
+            event_tuple = tuple(sorted(r["assignment"][b]))
+            bin_sets.append(event_tuple)
+        canonical_events = tuple(sorted(bin_sets))
+        fee_tuple = tuple(sorted(r["fees"].values()))
+        canonical = (canonical_events, fee_tuple, r["total"])
+        if canonical not in seen:
+            seen[canonical] = r
+    deduped = sorted(seen.values(), key=lambda x: x["total"])
+    removed = len(results) - len(deduped)
+    return deduped, removed
+
+
+def calculate_allocations(delivery_dates, free_days, rate_per_day, events,
+                          fixed_assignments=None, num_bins=2):
+    fixed_assignments = fixed_assignments or {}
+    n = len(events)
+    free_indices = [i for i in range(n) if i not in fixed_assignments]
+
+    results = []
+    for combo in product(range(1, num_bins + 1), repeat=len(free_indices)):
+        assignment = dict(fixed_assignments)
+        for idx, bin_num in zip(free_indices, combo):
+            assignment[idx] = bin_num
+
+        if not is_valid_assignment(events, assignment, delivery_dates):
+            continue
+
+        bins = {b: [] for b in range(1, num_bins + 1)}
+        for i, ev in enumerate(events):
+            bins[assignment[i]].append(ev)
+        for b in bins:
+            bins[b].sort(key=lambda e: e["haul_date"])
+
+        fees = {}
+        breakdowns = {}
